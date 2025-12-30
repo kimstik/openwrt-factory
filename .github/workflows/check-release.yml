@@ -54,26 +54,50 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Check if build is running
-      id: build_status
+    - name: Check if DIR-825-B1 build is running
+      id: build_status_825
       run: |
-        RUNNING=$(gh run list --workflow=build.yml --repo ${{ github.repository }} \
+        RUNNING=$(gh run list --workflow=build-dir-825-b1.yml --repo ${{ github.repository }} \
           --status in_progress --status queued --json databaseId --jq 'length' 2>/dev/null || echo "0")
         if [ "${RUNNING:-0}" -gt 0 ]; then
           echo "running=true" >> $GITHUB_OUTPUT
-          echo "Build already in progress, skipping trigger"
+          echo "DIR-825-B1 build already in progress"
         else
           echo "running=false" >> $GITHUB_OUTPUT
         fi
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Trigger build workflow
-      if: steps.check.outputs.exists == 'false' && steps.build_status.outputs.running != 'true'
+    - name: Check if HAME-A5 build is running
+      id: build_status_a5
       run: |
-        gh workflow run build.yml \
+        RUNNING=$(gh run list --workflow=build-hame-a5.yml --repo ${{ github.repository }} \
+          --status in_progress --status queued --json databaseId --jq 'length' 2>/dev/null || echo "0")
+        if [ "${RUNNING:-0}" -gt 0 ]; then
+          echo "running=true" >> $GITHUB_OUTPUT
+          echo "HAME-A5 build already in progress"
+        else
+          echo "running=false" >> $GITHUB_OUTPUT
+        fi
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Trigger DIR-825-B1 build
+      if: steps.check.outputs.exists == 'false' && steps.build_status_825.outputs.running != 'true'
+      run: |
+        gh workflow run build-dir-825-b1.yml \
           --repo ${{ github.repository }} \
           -f openwrt_version="${{ steps.openwrt.outputs.tag }}"
-        echo "Build triggered for ${{ steps.openwrt.outputs.tag }}"
+        echo "DIR-825-B1 build triggered for ${{ steps.openwrt.outputs.tag }}"
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Trigger HAME-A5 build
+      if: steps.check.outputs.exists == 'false' && steps.build_status_a5.outputs.running != 'true'
+      run: |
+        gh workflow run build-hame-a5.yml \
+          --repo ${{ github.repository }} \
+          -f openwrt_version="${{ steps.openwrt.outputs.tag }}"
+        echo "HAME-A5 build triggered for ${{ steps.openwrt.outputs.tag }}"
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

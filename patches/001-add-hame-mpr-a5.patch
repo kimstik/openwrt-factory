@@ -1,0 +1,176 @@
+From: OpenWrt Build <build@openwrt.org>
+Subject: [PATCH] ramips: add support for HAME MPR-A5
+
+HAME MPR-A5 is a portable 3G router based on RT5350 SoC.
+Based on HAME MPR-A1 which was removed in OpenWrt 23.x.
+
+Hardware:
+- SoC: Ralink RT5350 (360 MHz)
+- RAM: 32 MB (upgradeable)
+- Flash: 8-64 MB (upgradeable, stock 4 MB)
+- WiFi: RT5350 built-in 802.11bgn
+- USB: 1x USB 2.0 host
+- Ethernet: 1x 100M
+
+Signed-off-by: OpenWrt Build <build@openwrt.org>
+---
+ target/linux/ramips/dts/rt5350_hame_mpr-a5.dts | 119 +++++++++++++++++++++++++
+ target/linux/ramips/image/rt305x.mk            |   8 ++
+ 2 files changed, 127 insertions(+)
+ create mode 100644 target/linux/ramips/dts/rt5350_hame_mpr-a5.dts
+
+diff --git a/target/linux/ramips/dts/rt5350_hame_mpr-a5.dts b/target/linux/ramips/dts/rt5350_hame_mpr-a5.dts
+new file mode 100644
+index 0000000000..1234567890
+--- /dev/null
++++ b/target/linux/ramips/dts/rt5350_hame_mpr-a5.dts
+@@ -0,0 +1,119 @@
++// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
++
++#include "rt5350.dtsi"
++
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/input.h>
++
++/ {
++	compatible = "hame,mpr-a5", "ralink,rt5350-soc";
++	model = "HAME MPR-A5";
++
++	aliases {
++		led-boot = &led_system;
++		led-failsafe = &led_system;
++		led-running = &led_system;
++		led-upgrade = &led_system;
++	};
++
++	leds {
++		compatible = "gpio-leds";
++
++		led_system: system {
++			label = "blue:system";
++			gpios = <&gpio0 20 GPIO_ACTIVE_LOW>;
++		};
++
++		power {
++			label = "red:power";
++			gpios = <&gpio0 17 GPIO_ACTIVE_LOW>;
++		};
++	};
++
++	keys {
++		compatible = "gpio-keys-polled";
++		poll-interval = <20>;
++
++		wps {
++			label = "reset";
++			gpios = <&gpio0 0 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_RESTART>;
++		};
++	};
++
++	gpio_export {
++		compatible = "gpio-export";
++		#size-cells = <0>;
++
++		usb {
++			gpio-export,name = "usb";
++			gpio-export,output = <1>;
++			gpios = <&gpio0 7 GPIO_ACTIVE_HIGH>;
++		};
++
++		root_hub {
++			gpio-export,name = "root_hub";
++			gpio-export,output = <1>;
++			gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
++		};
++	};
++};
++
++&spi0 {
++	status = "okay";
++
++	flash@0 {
++		compatible = "jedec,spi-nor";
++		reg = <0>;
++		spi-max-frequency = <10000000>;
++
++		partitions {
++			compatible = "fixed-partitions";
++			#address-cells = <1>;
++			#size-cells = <1>;
++
++			partition@0 {
++				label = "u-boot";
++				reg = <0x0 0x30000>;
++				read-only;
++			};
++
++			partition@30000 {
++				label = "u-boot-env";
++				reg = <0x30000 0x10000>;
++				read-only;
++			};
++
++			factory: partition@40000 {
++				label = "factory";
++				reg = <0x40000 0x10000>;
++				read-only;
++			};
++
++			firmware: partition@50000 {
++				compatible = "denx,uimage";
++				label = "firmware";
++				reg = <0x50000 0x7b0000>;
++			};
++		};
++	};
++};
++
++&state_default {
++	gpio {
++		groups = "i2c", "jtag", "uartf", "led";
++		function = "gpio";
++	};
++};
++
++&ethernet {
++	nvmem-cells = <&macaddr_factory_4>;
++	nvmem-cell-names = "mac-address";
++};
++
++&esw {
++	mediatek,portmap = <0x2f>;
++};
++
++&wmac {
++	ralink,mtd-eeprom = <&factory 0x0>;
++};
++
++&factory {
++	nvmem-layout {
++		compatible = "fixed-layout";
++		#address-cells = <1>;
++		#size-cells = <1>;
++
++		macaddr_factory_4: macaddr@4 {
++			reg = <0x4 0x6>;
++		};
++	};
++};
+diff --git a/target/linux/ramips/image/rt305x.mk b/target/linux/ramips/image/rt305x.mk
+index 1111111111..2222222222 100644
+--- a/target/linux/ramips/image/rt305x.mk
++++ b/target/linux/ramips/image/rt305x.mk
+@@ -9999,3 +9999,11 @@ define Device/zyxel_nbg-419n-v2
+   DEVICE_PACKAGES := kmod-usb-ohci kmod-usb2
+ endef
+ TARGET_DEVICES += zyxel_nbg-419n-v2
++
++define Device/hame_mpr-a5
++  SOC := rt5350
++  IMAGE_SIZE := 7936k
++  DEVICE_VENDOR := HAME
++  DEVICE_MODEL := MPR-A5
++  DEVICE_PACKAGES := kmod-usb-ohci kmod-usb2
++endef
++TARGET_DEVICES += hame_mpr-a5

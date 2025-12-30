@@ -1,11 +1,11 @@
-name: Build OpenWrt for DIR-825-B1
+name: Build OpenWrt for HAME-A5
 
 permissions:
   contents: write
   actions: write
 
 concurrency:
-  group: build-${{ github.workflow }}
+  group: build-hame-a5-${{ github.workflow }}
   cancel-in-progress: false
 
 on:
@@ -57,10 +57,10 @@ on:
 
 env:
   OPENWRT_REPO: https://git.openwrt.org/openwrt/openwrt.git
-  TARGET: ath79
-  SUBTARGET: generic
-  DEVICE: dlink_dir-825-b1
-  CACHE_SALT: "-0"  # change to invalidate caches, "" for release
+  TARGET: ramips
+  SUBTARGET: rt305x
+  DEVICE: hame_mpr-a5
+  CACHE_SALT: "-0"
 
 jobs:
   # === Job 1: Prepare ===
@@ -75,7 +75,7 @@ jobs:
     steps:
     - name: Check for already running builds
       run: |
-        RUNNING=$(gh run list --workflow=build.yml --repo ${{ github.repository }} \
+        RUNNING=$(gh run list --workflow=build-hame-a5.yml --repo ${{ github.repository }} \
           --status=in_progress --status=queued --json databaseId -q 'length')
         if [ "$RUNNING" -gt 1 ]; then
           echo "ERROR: Another build is already running or queued ($RUNNING total)"
@@ -89,7 +89,7 @@ jobs:
     - name: Cleanup old workflow runs
       continue-on-error: true
       run: |
-        gh run list --workflow=build.yml --repo ${{ github.repository }} \
+        gh run list --workflow=build-hame-a5.yml --repo ${{ github.repository }} \
           --json databaseId --jq '.[5:] | .[].databaseId' | \
         while read run_id; do
           echo "Deleting run $run_id"
@@ -285,7 +285,7 @@ jobs:
       if: inputs.collect_stats == true || inputs.collect_stats == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: build-stats-toolchain
+        name: build-stats-toolchain-a5
         path: stats/
         retention-days: 90
 
@@ -513,7 +513,7 @@ jobs:
         shopt -s nullglob
         if [ -d "patches/dts" ]; then
           for dts in patches/dts/*.dts; do
-            cp -v "$dts" openwrt/target/linux/ath79/dts/
+            cp -v "$dts" openwrt/target/linux/ramips/dts/
           done
         fi
         if [ -d "patches" ]; then
@@ -523,51 +523,53 @@ jobs:
           done
         fi
 
-    - name: Generate DTS for custom flash
-      if: matrix.flash_size != '8'
+    - name: Generate DTS for flash variant
       run: |
         cd openwrt
         FLASH_MB=${{ matrix.flash_size }}
-        CALDATA_END=$((0x670000))
+        FIRMWARE_START=$((0x50000))
         FLASH_BYTES=$((FLASH_MB * 1024 * 1024))
-        FWCONCAT1_SIZE=$((FLASH_BYTES - CALDATA_END))
-        FWCONCAT1_HEX=$(printf "0x%x" $FWCONCAT1_SIZE)
-        DEVICE_NAME="dlink_dir-825-b1-${FLASH_MB}m"
-        DTS_FILE="target/linux/ath79/dts/ar7161_${DEVICE_NAME}.dts"
-        GENERIC_MK="target/linux/ath79/image/generic.mk"
-        DEVICE_ID="dlink_dir-825-b1-${FLASH_MB}m"
+        FIRMWARE_SIZE=$((FLASH_BYTES - FIRMWARE_START))
+        FIRMWARE_HEX=$(printf "0x%x" $FIRMWARE_SIZE)
+        DEVICE_NAME="hame_mpr-a5-${FLASH_MB}m"
+        DTS_FILE="target/linux/ramips/dts/rt5350_${DEVICE_NAME}.dts"
+        RT305X_MK="target/linux/ramips/image/rt305x.mk"
 
         # Generate DTS if not exists
         if [ ! -f "$DTS_FILE" ]; then
           printf '%s\n' \
             '// SPDX-License-Identifier: GPL-2.0-or-later OR MIT' \
             '/dts-v1/;' \
-            '#include "ar7161_dlink_dir-825-b1.dts"' \
-            "// D-Link DIR-825-B1 with ${FLASH_MB}MB flash" \
+            '' \
+            '#include "rt5350_hame_mpr-a5.dts"' \
+            '' \
+            '// HAME MPR-A5 with '"${FLASH_MB}"'MB flash' \
             '/ {' \
-            "	model = \"D-Link DIR-825 B1 (${FLASH_MB}MB)\";" \
-            "	compatible = \"dlink,dir-825-b1-${FLASH_MB}m\", \"dlink,dir-825-b1\", \"qca,ar7161\";" \
+            '	model = "HAME MPR-A5 ('"${FLASH_MB}"'MB)";' \
+            '	compatible = "hame,mpr-a5-'"${FLASH_MB}"'m", "hame,mpr-a5", "ralink,rt5350-soc";' \
             '};' \
-            '&fwconcat1 {' \
-            "	reg = <0x670000 ${FWCONCAT1_HEX}>;" \
+            '' \
+            '&firmware {' \
+            '	reg = <0x50000 '"${FIRMWARE_HEX}"'>;' \
             '};' > "$DTS_FILE"
           echo "Generated: $DTS_FILE"
+          cat "$DTS_FILE"
         else
           echo "DTS exists: $DTS_FILE"
         fi
 
-        # Register device in generic.mk if not exists
-        if ! grep -q "define Device/${DEVICE_ID}" "$GENERIC_MK"; then
+        # Register device in rt305x.mk if not exists
+        if ! grep -q "define Device/${DEVICE_NAME}" "$RT305X_MK"; then
           printf '\n%s\n' \
-            "define Device/${DEVICE_ID}" \
-            '  $(call Device/dlink_dir-825-b1)' \
-            "  DEVICE_MODEL := DIR-825 B1 (${FLASH_MB}MB)" \
-            "  DEVICE_DTS := ar7161_${DEVICE_ID}" \
+            "define Device/${DEVICE_NAME}" \
+            '  $(call Device/hame_mpr-a5)' \
+            "  DEVICE_MODEL := MPR-A5 (${FLASH_MB}MB)" \
+            "  DEVICE_DTS := rt5350_${DEVICE_NAME}" \
             'endef' \
-            "TARGET_DEVICES += ${DEVICE_ID}" >> "$GENERIC_MK"
-          echo "Registered device: ${DEVICE_ID}"
+            "TARGET_DEVICES += ${DEVICE_NAME}" >> "$RT305X_MK"
+          echo "Registered device: ${DEVICE_NAME}"
         else
-          echo "Device already registered: ${DEVICE_ID}"
+          echo "Device already registered: ${DEVICE_NAME}"
         fi
 
     - name: Update feeds
@@ -589,11 +591,7 @@ jobs:
         FLASH_MB=${{ matrix.flash_size }}
         OPT=${{ matrix.opt }}
 
-        if [ "$FLASH_MB" = "8" ]; then
-          DEVICE_CFG="${DEVICE}"
-        else
-          DEVICE_CFG="dlink_dir-825-b1-${FLASH_MB}m"
-        fi
+        DEVICE_CFG="hame_mpr-a5-${FLASH_MB}m"
 
         # Base config
         printf '%s\n' \
@@ -715,11 +713,7 @@ jobs:
         cd openwrt/bin/targets/${TARGET}/${SUBTARGET}
         FLASH_MB=${{ matrix.flash_size }}
 
-        if [ "$FLASH_MB" = "8" ]; then
-          PATTERN="*${DEVICE}*sysupgrade*"
-        else
-          PATTERN="*dir-825-b1-${FLASH_MB}m*sysupgrade*"
-        fi
+        PATTERN="*mpr-a5-${FLASH_MB}m*sysupgrade*"
 
         shopt -s nullglob
         FILES=($PATTERN)
@@ -731,12 +725,9 @@ jobs:
 
         for f in "${FILES[@]}"; do
           SIZE=$(stat -c%s "$f")
-          # Max size = fwconcat0 + fwconcat1
-          # fwconcat0 = 0x610000 (6356992)
-          # fwconcat1 depends on flash size
-          FWCONCAT0=6356992
-          FWCONCAT1=$(( (FLASH_MB * 1024 * 1024) - 0x670000 ))
-          MAX_SIZE=$((FWCONCAT0 + FWCONCAT1))
+          # Max size = flash - 0x50000 (firmware partition start)
+          FIRMWARE_START=$((0x50000))
+          MAX_SIZE=$((FLASH_MB * 1024 * 1024 - FIRMWARE_START))
 
           echo "Firmware: $f"
           echo "Size: $SIZE bytes"
@@ -760,26 +751,22 @@ jobs:
         # Build archive name based on optimization level
         case "$OPT" in
           base)
-            ARCHIVE_NAME="openwrt-${VERSION_SHORT}-DIR-825-B1-${FLASH_MB}MB"
+            ARCHIVE_NAME="openwrt-${VERSION_SHORT}-HAME-A5-${FLASH_MB}MB"
             ;;
           lto)
-            ARCHIVE_NAME="openwrt-${VERSION_SHORT}-DIR-825-B1-${FLASH_MB}MB-LTO"
+            ARCHIVE_NAME="openwrt-${VERSION_SHORT}-HAME-A5-${FLASH_MB}MB-LTO"
             ;;
           lto-gc)
-            ARCHIVE_NAME="openwrt-${VERSION_SHORT}-DIR-825-B1-${FLASH_MB}MB-LTO-GC"
+            ARCHIVE_NAME="openwrt-${VERSION_SHORT}-HAME-A5-${FLASH_MB}MB-LTO-GC"
             ;;
           x)
-            ARCHIVE_NAME="openwrt-${VERSION_SHORT}-DIR-825-B1-${FLASH_MB}MB-X"
+            ARCHIVE_NAME="openwrt-${VERSION_SHORT}-HAME-A5-${FLASH_MB}MB-X"
             ;;
         esac
 
         mkdir -p artifacts
         SRC="openwrt/bin/targets/${TARGET}/${SUBTARGET}"
-        if [ "$FLASH_MB" = "8" ]; then
-          cp "${SRC}"/*"${DEVICE}"*.bin artifacts/ 2>/dev/null || true
-        else
-          cp "${SRC}"/*dir-825-b1-"${FLASH_MB}"m*.bin artifacts/ 2>/dev/null || true
-        fi
+        cp "${SRC}"/*mpr-a5-"${FLASH_MB}"m*.bin artifacts/ 2>/dev/null || true
 
         # Verify firmware files exist
         if [ -z "$(ls -A artifacts/*.bin 2>/dev/null)" ]; then
@@ -819,7 +806,7 @@ jobs:
     - name: Upload size info
       uses: actions/upload-artifact@v4
       with:
-        name: size-${{ matrix.flash_size }}-${{ matrix.opt }}
+        name: size-a5-${{ matrix.flash_size }}-${{ matrix.opt }}
         path: sizes/
         retention-days: 1
 
@@ -827,7 +814,7 @@ jobs:
       if: inputs.save_elf == true || inputs.save_elf == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: elf-${{ matrix.flash_size }}-${{ matrix.opt }}
+        name: elf-a5-${{ matrix.flash_size }}-${{ matrix.opt }}
         path: openwrt/build_dir/target-*/linux-*/vmlinux.elf
         retention-days: 1
 
@@ -844,7 +831,7 @@ jobs:
       continue-on-error: true
       with:
         path: release
-        pattern: openwrt-*
+        pattern: openwrt-*-HAME-A5-*
         merge-multiple: true
 
     - name: Download size artifacts
@@ -852,7 +839,7 @@ jobs:
       continue-on-error: true
       with:
         path: sizes
-        pattern: size-*
+        pattern: size-a5-*
         merge-multiple: true
 
     - name: Download ELF artifacts
@@ -861,7 +848,7 @@ jobs:
       continue-on-error: true
       with:
         path: elf
-        pattern: elf-*
+        pattern: elf-a5-*
         merge-multiple: false
 
     - name: Pack ELF files
@@ -871,9 +858,9 @@ jobs:
         VERSION_SHORT=$(echo "$VERSION" | sed 's/^v//')
         mkdir -p elf-all elf-out
         # Collect and rename ELF files
-        for dir in elf/elf-*/; do
+        for dir in elf/elf-a5-*/; do
           if [ -d "$dir" ]; then
-            NAME=$(basename "$dir" | sed 's/elf-//')  # e.g., "8-base"
+            NAME=$(basename "$dir" | sed 's/elf-a5-//')  # e.g., "8-base"
             FLASH=$(echo "$NAME" | cut -d- -f1)
             OPT=$(echo "$NAME" | cut -d- -f2)
             find "$dir" -name "*.elf" -exec cp {} "elf-all/vmlinux-${FLASH}MB-${OPT}.elf" \;
@@ -881,7 +868,7 @@ jobs:
         done
         if [ -n "$(ls -A elf-all/ 2>/dev/null)" ]; then
           sudo apt-get update && sudo apt-get install -y p7zip-full
-          7z a -mx=9 "elf-out/vmlinux-${VERSION_SHORT}.7z" elf-all/*.elf
+          7z a -mx=9 "elf-out/vmlinux-a5-${VERSION_SHORT}.7z" elf-all/*.elf
           echo "Created ELF archive with $(ls elf-all/*.elf | wc -l) files"
         fi
 
@@ -890,7 +877,7 @@ jobs:
       uses: actions/upload-artifact@v4
       continue-on-error: true
       with:
-        name: vmlinux-elf
+        name: vmlinux-elf-a5
         path: elf-out/*.7z
         retention-days: 90
 
@@ -907,7 +894,7 @@ jobs:
           local base=$2
           local flash_mb=$3
           if [ -z "$size" ] || [ "$size" = "0" ]; then
-            echo "—"
+            echo "-"
             return
           fi
 
@@ -925,8 +912,8 @@ jobs:
           # Free space suffix - only show for 8MB where space is tight
           local free_suffix=""
           if [ "$flash_mb" = "8" ]; then
-            # max = fwconcat0 (0x610000) + fwconcat1 (flash - 0x670000)
-            local max_size=$((6356992 + 8 * 1024 * 1024 - 6750208))
+            # max = flash - 0x50000
+            local max_size=$((8 * 1024 * 1024 - 0x50000))
             local free=$((max_size - size))
             local free_kb=$((free / 1024))
             free_suffix=", ${free_kb}K free"
@@ -943,11 +930,7 @@ jobs:
           echo "|------:|------|-----|--------|---|"
 
           for flash in 8 16 32 64; do
-            if [ "$flash" = "8" ]; then
-              ROW="| 8MB (stock)"
-            else
-              ROW="| ${flash}MB"
-            fi
+            ROW="| ${flash}MB"
 
             # Get base size for delta calculation
             BASE_SIZE=""
@@ -958,10 +941,10 @@ jobs:
             for opt in base lto lto-gc x; do
               # Check if archive exists
               case "$opt" in
-                base) PATTERN="*-${flash}MB.7z" ;;
-                lto) PATTERN="*-${flash}MB-LTO.7z" ;;
-                lto-gc) PATTERN="*-${flash}MB-LTO-GC.7z" ;;
-                x) PATTERN="*-${flash}MB-X.7z" ;;
+                base) PATTERN="*-HAME-A5-${flash}MB.7z" ;;
+                lto) PATTERN="*-HAME-A5-${flash}MB-LTO.7z" ;;
+                lto-gc) PATTERN="*-HAME-A5-${flash}MB-LTO-GC.7z" ;;
+                x) PATTERN="*-HAME-A5-${flash}MB-X.7z" ;;
               esac
 
               if ls release/$PATTERN 1>/dev/null 2>&1; then
@@ -977,7 +960,7 @@ jobs:
                 fi
                 ROW="$ROW | $CELL"
               else
-                ROW="$ROW | —"
+                ROW="$ROW | -"
               fi
             done
             echo "$ROW |"
@@ -1004,18 +987,20 @@ jobs:
       if: steps.release_files.outputs.skip != 'true'
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ needs.prepare.outputs.openwrt_tag }}
-        name: "OpenWrt ${{ needs.prepare.outputs.openwrt_tag }} for DIR-825-B1"
+        tag_name: ${{ needs.prepare.outputs.openwrt_tag }}-a5
+        name: "OpenWrt ${{ needs.prepare.outputs.openwrt_tag }} for HAME-A5"
         body: |
-          ## OpenWrt ${{ needs.prepare.outputs.openwrt_tag }} for D-Link DIR-825-B1
+          ## OpenWrt ${{ needs.prepare.outputs.openwrt_tag }} for HAME MPR-A5
+
+          Uses HAME MPR-A1 firmware (compatible with A5).
 
           ### Downloads
 
           ${{ steps.release_files.outputs.TABLE }}
 
           ### Archive contents
-          - `*-sysupgrade.bin` — upgrade via LuCI web interface
-          - `*-initramfs-kernel.bin` — initial install via TFTP
+          - `*-sysupgrade.bin` - upgrade via LuCI web interface
+          - `*-initramfs-kernel.bin` - initial install via TFTP
 
           ### Optimization levels
           | Variant | Description |
@@ -1031,8 +1016,8 @@ jobs:
     - name: Cleanup temporary artifacts
       continue-on-error: true
       run: |
-        # Delete size-* and elf-* temporary artifacts
-        gh api repos/${{ github.repository }}/actions/artifacts --paginate -q '.artifacts[] | select(.name | startswith("size-") or startswith("elf-")) | .id' | \
+        # Delete size-a5-* and elf-a5-* temporary artifacts
+        gh api repos/${{ github.repository }}/actions/artifacts --paginate -q '.artifacts[] | select(.name | startswith("size-a5-") or startswith("elf-a5-")) | .id' | \
         while read id; do
           echo "Deleting artifact $id"
           gh api -X DELETE repos/${{ github.repository }}/actions/artifacts/$id || true

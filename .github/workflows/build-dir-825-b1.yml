@@ -1,0 +1,1041 @@
+name: Build OpenWrt for DIR-825-B1
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: build-${{ github.workflow }}
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'OpenWrt version (tag or "latest")'
+        required: false
+        default: 'latest'
+      flash_sizes:
+        description: 'Flash sizes (comma-separated)'
+        required: false
+        default: '8,16,32,64'
+      opt_base:
+        description: 'Build Base (default -Os)'
+        required: false
+        type: boolean
+        default: true
+      opt_lto:
+        description: 'Build LTO'
+        required: false
+        type: boolean
+        default: false
+      opt_lto_gc:
+        description: 'Build LTO-GC'
+        required: false
+        type: boolean
+        default: false
+      opt_x:
+        description: 'Build X (experimental)'
+        required: false
+        type: boolean
+        default: true
+      create_release:
+        description: 'Create GitHub release'
+        required: false
+        type: boolean
+        default: true
+      collect_stats:
+        description: 'Collect build statistics'
+        required: false
+        type: boolean
+        default: false
+      save_elf:
+        description: 'Save ELF files for analysis'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  OPENWRT_REPO: https://git.openwrt.org/openwrt/openwrt.git
+  TARGET: ath79
+  SUBTARGET: generic
+  DEVICE: dlink_dir-825-b1
+  CACHE_SALT: "-0"  # change to invalidate caches, "" for release
+
+jobs:
+  # === Job 1: Prepare ===
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      openwrt_tag: ${{ steps.version.outputs.tag }}
+      matrix: ${{ steps.matrix.outputs.json }}
+      opt_matrix: ${{ steps.matrix.outputs.opt_json }}
+      has_opts: ${{ steps.matrix.outputs.has_opts }}
+
+    steps:
+    - name: Check for already running builds
+      run: |
+        RUNNING=$(gh run list --workflow=build-dir-825-b1.yml --repo ${{ github.repository }} \
+          --status=in_progress --status=queued --json databaseId -q 'length')
+        if [ "$RUNNING" -gt 1 ]; then
+          echo "ERROR: Another build is already running or queued ($RUNNING total)"
+          echo "Skipping this run to avoid resource waste"
+          exit 1
+        fi
+        echo "No conflicting builds found, proceeding..."
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Cleanup old workflow runs
+      continue-on-error: true
+      run: |
+        gh run list --workflow=build-dir-825-b1.yml --repo ${{ github.repository }} \
+          --json databaseId --jq '.[5:] | .[].databaseId' | \
+        while read run_id; do
+          echo "Deleting run $run_id"
+          gh run delete "$run_id" --repo ${{ github.repository }} || true
+        done
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Determine OpenWrt version
+      id: version
+      run: |
+        if [ "${{ inputs.openwrt_version }}" = "latest" ] || [ -z "${{ inputs.openwrt_version }}" ]; then
+          TAG=$(git ls-remote --tags "$OPENWRT_REPO" | \
+                grep -oE 'refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' | \
+                sed 's|refs/tags/||' | sort -V | tail -1)
+        else
+          TAG="${{ inputs.openwrt_version }}"
+        fi
+        if [ -z "$TAG" ]; then
+          echo "ERROR: Failed to determine OpenWrt version"
+          exit 1
+        fi
+        echo "tag=$TAG" >> $GITHUB_OUTPUT
+        echo "OpenWrt version: $TAG"
+
+    - name: Generate build matrix
+      id: matrix
+      run: |
+        SIZES="${{ inputs.flash_sizes }}"
+        [ -z "$SIZES" ] && SIZES="8,16,32,64"
+        SIZES=$(echo "$SIZES" | tr -d ' ')
+
+        # Collect selected optimization levels
+        OPT_LEVELS=""
+        if [ "${{ inputs.opt_base }}" = "true" ] || [ -z "${{ inputs.opt_base }}" ]; then
+          OPT_LEVELS="base"
+        fi
+        if [ "${{ inputs.opt_lto }}" = "true" ] || [ -z "${{ inputs.opt_lto }}" ]; then
+          OPT_LEVELS="$OPT_LEVELS lto"
+        fi
+        if [ "${{ inputs.opt_lto_gc }}" = "true" ] || [ -z "${{ inputs.opt_lto_gc }}" ]; then
+          OPT_LEVELS="$OPT_LEVELS lto-gc"
+        fi
+        if [ "${{ inputs.opt_x }}" = "true" ] || [ -z "${{ inputs.opt_x }}" ]; then
+          OPT_LEVELS="$OPT_LEVELS x"
+        fi
+        OPT_LEVELS=$(echo "$OPT_LEVELS" | xargs)  # trim
+
+        if [ -z "$OPT_LEVELS" ]; then
+          echo "ERROR: No optimization levels selected!"
+          exit 1
+        fi
+
+        # Generate firmware matrix (flash_size x opt)
+        MATRIX='{"include":['
+        FIRST=true
+        for size in $(echo "$SIZES" | tr ',' ' '); do
+          for opt in $OPT_LEVELS; do
+            [ "$FIRST" = "true" ] && FIRST=false || MATRIX="$MATRIX,"
+            MATRIX="$MATRIX{\"flash_size\":\"$size\",\"opt\":\"$opt\"}"
+          done
+        done
+        MATRIX="$MATRIX]}"
+        echo "json=$MATRIX" >> $GITHUB_OUTPUT
+        echo "Firmware matrix: $MATRIX"
+
+        # Generate opt-cache matrix (all opt levels including base)
+        OPT_MATRIX='{"include":['
+        FIRST=true
+        HAS_OPTS="false"
+        for opt in $OPT_LEVELS; do
+          HAS_OPTS="true"
+          [ "$FIRST" = "true" ] && FIRST=false || OPT_MATRIX="$OPT_MATRIX,"
+          OPT_MATRIX="$OPT_MATRIX{\"opt\":\"$opt\"}"
+        done
+        OPT_MATRIX="$OPT_MATRIX]}"
+        echo "opt_json=$OPT_MATRIX" >> $GITHUB_OUTPUT
+        echo "has_opts=$HAS_OPTS" >> $GITHUB_OUTPUT
+        echo "Opt-cache matrix: $OPT_MATRIX"
+
+  # === Job 2: Build toolchain ===
+  build-base:
+    needs: prepare
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                    /usr/local/share/boost /opt/hostedtoolcache
+        sudo apt-get clean
+        df -h
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential clang flex bison g++ gawk \
+          gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+          python3-setuptools rsync swig unzip zlib1g-dev file wget
+
+    - name: Clone OpenWrt
+      run: |
+        for attempt in 1 2 3 4 5; do
+          echo "=== Clone attempt $attempt ==="
+          if git clone --depth 1 --branch "${{ needs.prepare.outputs.openwrt_tag }}" \
+               "$OPENWRT_REPO" openwrt; then
+            echo "Clone successful"
+            break
+          fi
+          echo "Clone failed, waiting before retry..."
+          rm -rf openwrt || true
+          sleep $((attempt * 30))
+        done
+        [ -d openwrt/.git ] || { echo "ERROR: Clone failed after 5 attempts"; exit 1; }
+
+    - name: Restore toolchain cache
+      id: cache-toolchain
+      uses: actions/cache/restore@v4
+      with:
+        path: openwrt/staging_dir
+        key: toolchain-u24-${{ env.TARGET }}-${{ needs.prepare.outputs.openwrt_tag }}-base${{ env.CACHE_SALT }}
+
+    - name: Restore downloads cache
+      id: cache-dl
+      uses: actions/cache/restore@v4
+      with:
+        path: openwrt/dl
+        key: dl-u24-${{ env.TARGET }}-${{ needs.prepare.outputs.openwrt_tag }}
+        restore-keys: |
+          dl-u24-${{ env.TARGET }}-
+
+    - name: Update feeds
+      run: |
+        cd openwrt
+        # Retry feeds update with exponential backoff
+        for delay in 0 5 10 30 60 120; do
+          [ $delay -gt 0 ] && { echo "Retrying in ${delay}s..."; sleep $delay; }
+          echo "=== Feeds update attempt ==="
+          ./scripts/feeds update -a && break
+        done
+        ./scripts/feeds install -a
+
+    - name: Build toolchain (if not cached)
+      if: steps.cache-toolchain.outputs.cache-hit != 'true'
+      timeout-minutes: 120
+      run: |
+        cd openwrt
+        echo "CONFIG_TARGET_${TARGET}=y" > .config
+        echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}=y" >> .config
+        make defconfig
+
+        echo "=== Building tools ==="
+        START=$(date +%s)
+        make -j$(nproc) tools/compile || make -j1 V=s tools/compile
+        echo "Tools build time: $(($(date +%s) - START)) seconds"
+
+        echo "=== Building toolchain ==="
+        START=$(date +%s)
+        make -j$(nproc) toolchain/compile || make -j1 V=s toolchain/compile
+        echo "Toolchain build time: $(($(date +%s) - START)) seconds"
+
+    - name: Collect build stats
+      if: inputs.collect_stats == true || inputs.collect_stats == 'true'
+      run: |
+        STATS="build-stats-toolchain.txt"
+        {
+          echo "=== OpenWrt Toolchain Build Stats ==="
+          echo "Date: $(date -Iseconds)"
+          echo "Runner: $(uname -a)"
+          echo ""
+          echo "=== Total sizes ==="
+          echo "Uncompressed:"
+          du -sh openwrt/staging_dir openwrt/build_dir openwrt/dl 2>/dev/null || true
+          echo ""
+          echo "Compressed (zstd, GitHub cache format):"
+          printf "staging_dir: "; tar -cf - -C openwrt staging_dir 2>/dev/null | zstd -1 -c | wc -c | awk '{printf "%.2f GB\n", $1/1024/1024/1024}'
+          printf "dl:          "; tar -cf - -C openwrt dl 2>/dev/null | zstd -1 -c | wc -c | awk '{printf "%.2f GB\n", $1/1024/1024/1024}'
+          printf "build_dir:   "; tar -cf - -C openwrt build_dir 2>/dev/null | zstd -1 -c | wc -c | awk '{printf "%.2f GB\n", $1/1024/1024/1024}'
+          echo ""
+          echo "=== staging_dir breakdown ==="
+          du -sh openwrt/staging_dir/*/ 2>/dev/null | sort -rh || true
+          echo ""
+          echo "=== build_dir breakdown ==="
+          du -sh openwrt/build_dir/*/ 2>/dev/null | sort -rh || true
+        } | tee "$STATS"
+        mkdir -p ${{ github.workspace }}/stats
+        cp "$STATS" ${{ github.workspace }}/stats/
+
+    - name: Upload build stats
+      if: inputs.collect_stats == true || inputs.collect_stats == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-stats-toolchain
+        path: stats/
+        retention-days: 90
+
+    - name: Save toolchain cache
+      if: steps.cache-toolchain.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@v4
+      with:
+        path: openwrt/staging_dir
+        key: toolchain-u24-${{ env.TARGET }}-${{ needs.prepare.outputs.openwrt_tag }}-base${{ env.CACHE_SALT }}
+
+    - name: Save downloads cache
+      if: steps.cache-dl.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@v4
+      with:
+        path: openwrt/dl
+        key: dl-u24-${{ env.TARGET }}-${{ needs.prepare.outputs.openwrt_tag }}
+
+  # === Job 3: Build optimization-specific caches ===
+  build-opt-cache:
+    needs: [prepare, build-base]
+    if: needs.prepare.outputs.has_opts == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.opt_matrix) }}
+      fail-fast: false
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Check if cache already exists
+      id: cache-check
+      uses: actions/cache/restore@v4
+      with:
+        path: openwrt/staging_dir
+        key: toolchain-u24-${{ env.TARGET }}-${{ needs.prepare.outputs.openwrt_tag }}-${{ matrix.opt }}${{ env.CACHE_SALT }}
+        lookup-only: true
+
+    - name: Skip if cache exists
+      if: steps.cache-check.outputs.cache-hit == 'true'
+      run: echo "Cache for ${{ matrix.opt }} already exists, skipping build"
+
+    - name: Free disk space
+      if: steps.cache-check.outputs.cache-hit != 'true'
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                    /usr/local/share/boost /opt/hostedtoolcache
+        sudo apt-get clean
+
+    - name: Install dependencies
+      if: steps.cache-check.outputs.cache-hit != 'true'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential clang flex bison g++ gawk \
+          gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+          python3-setuptools rsync swig unzip zlib1g-dev file wget
+
+    - name: Clone OpenWrt
+      if: steps.cache-check.outputs.cache-hit != 'true'
+      run: |
+        for attempt in 1 2 3 4 5; do
+          echo "=== Clone attempt $attempt ==="
+          if git clone --depth 1 --branch "${{ needs.prepare.outputs.openwrt_tag }}" \
+               "$OPENWRT_REPO" openwrt; then
+            echo "Clone successful"
+            break
+          fi
+          echo "Clone failed, waiting before retry..."
+          rm -rf openwrt || true
+          sleep $((attempt * 30))
+        done
+        [ -d openwrt/.git ] || { echo "ERROR: Clone failed after 5 attempts"; exit 1; }
+
+    - name: Restore base toolchain cache
+      if: steps.cache-check.outputs.cache-hit != 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: openwrt/staging_dir
+        key: toolchain-u24-${{ env.TARGET }}-${{ needs.prepare.outputs.openwrt_tag }}-base${{ env.CACHE_SALT }}
+        fail-on-cache-miss: true
+
+    - name: Restore downloads cache
+      if: steps.cache-check.outputs.cache-hit != 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: openwrt/dl
+        key: dl-u24-${{ env.TARGET }}-${{ needs.prepare.outputs.openwrt_tag }}
+        restore-keys: dl-u24-${{ env.TARGET }}-
+
+    - name: Clean target packages for optimization rebuild
+      if: steps.cache-check.outputs.cache-hit != 'true'
+      run: |
+        echo "=== Cleaning for ${{ matrix.opt }} optimization ==="
+        rm -rf openwrt/staging_dir/target-* || true
+        rm -rf openwrt/build_dir/target-* || true
+        ls -la openwrt/staging_dir/
+
+    - name: Update feeds
+      if: steps.cache-check.outputs.cache-hit != 'true'
+      run: |
+        cd openwrt
+        for delay in 0 5 10 30 60 120; do
+          [ $delay -gt 0 ] && { echo "Retrying in ${delay}s..."; sleep $delay; }
+          echo "=== Feeds update attempt ==="
+          ./scripts/feeds update -a && break
+        done
+        ./scripts/feeds install -a
+
+    - name: Configure with optimization flags
+      if: steps.cache-check.outputs.cache-hit != 'true'
+      run: |
+        cd openwrt
+        OPT=${{ matrix.opt }}
+
+        printf '%s\n' \
+          "CONFIG_TARGET_${TARGET}=y" \
+          "CONFIG_TARGET_${TARGET}_${SUBTARGET}=y" \
+          "CONFIG_TARGET_${TARGET}_${SUBTARGET}_DEVICE_${DEVICE}=y" > .config
+
+        case "$OPT" in
+          base)
+            echo "Optimization: Base (default -Os)"
+            ;;
+          lto)
+            echo "Optimization: LTO"
+            echo "CONFIG_DEVEL=y" >> .config
+            echo "CONFIG_USE_LTO=y" >> .config
+            ;;
+          lto-gc)
+            echo "Optimization: LTO + GC_SECTIONS"
+            echo "CONFIG_DEVEL=y" >> .config
+            echo "CONFIG_USE_LTO=y" >> .config
+            echo "CONFIG_USE_GC_SECTIONS=y" >> .config
+            ;;
+          x)
+            echo "Optimization: X (experimental)"
+            echo "CONFIG_DEVEL=y" >> .config
+            echo "CONFIG_USE_LTO=y" >> .config
+            echo "CONFIG_USE_GC_SECTIONS=y" >> .config
+            echo 'CONFIG_EXTRA_OPTIMIZATION="-fsection-anchors -fipa-pta -fira-loop-pressure -fira-region=all"' >> .config
+            ;;
+        esac
+
+        make defconfig
+
+        echo "=== Final config ==="
+        grep -E "^CONFIG_(USE_LTO|USE_GC_SECTIONS|EXTRA_OPTIMIZATION)" .config || echo "(default)"
+
+    - name: Build packages with optimization
+      if: steps.cache-check.outputs.cache-hit != 'true'
+      timeout-minutes: 60
+      run: |
+        cd openwrt
+        echo "=== Building packages with ${{ matrix.opt }} optimization ==="
+        make -j$(nproc) target/compile package/compile package/install \
+          || make -j1 V=s target/compile package/compile package/install
+
+    - name: Save optimization cache
+      if: steps.cache-check.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: openwrt/staging_dir
+        key: toolchain-u24-${{ env.TARGET }}-${{ needs.prepare.outputs.openwrt_tag }}-${{ matrix.opt }}${{ env.CACHE_SALT }}
+
+  # === Job 4: Matrix firmware build ===
+  build-firmware:
+    needs: [prepare, build-base, build-opt-cache]
+    if: always() && needs.build-base.result == 'success' && (needs.build-opt-cache.result == 'success' || needs.build-opt-cache.result == 'skipped')
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                    /usr/local/share/boost /opt/hostedtoolcache
+        sudo apt-get clean
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential clang flex bison g++ gawk \
+          gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+          python3-setuptools rsync swig unzip zlib1g-dev file wget p7zip-full
+
+    - name: Clone OpenWrt
+      run: |
+        for attempt in 1 2 3 4 5; do
+          echo "=== Clone attempt $attempt ==="
+          if git clone --depth 1 --branch "${{ needs.prepare.outputs.openwrt_tag }}" \
+               "$OPENWRT_REPO" openwrt; then
+            echo "Clone successful"
+            break
+          fi
+          echo "Clone failed, waiting before retry..."
+          rm -rf openwrt || true
+          sleep $((attempt * 30))
+        done
+        [ -d openwrt/.git ] || { echo "ERROR: Clone failed after 5 attempts"; exit 1; }
+
+    - name: Restore toolchain cache
+      uses: actions/cache/restore@v4
+      with:
+        path: openwrt/staging_dir
+        key: toolchain-u24-${{ env.TARGET }}-${{ needs.prepare.outputs.openwrt_tag }}-${{ matrix.opt }}${{ env.CACHE_SALT }}
+        fail-on-cache-miss: true
+
+    - name: Restore downloads cache
+      uses: actions/cache/restore@v4
+      with:
+        path: openwrt/dl
+        key: dl-u24-${{ env.TARGET }}-${{ needs.prepare.outputs.openwrt_tag }}
+        restore-keys: |
+          dl-u24-${{ env.TARGET }}-
+
+    - name: Apply patches
+      run: |
+        shopt -s nullglob
+        if [ -d "patches/dts" ]; then
+          for dts in patches/dts/*.dts; do
+            cp -v "$dts" openwrt/target/linux/ath79/dts/
+          done
+        fi
+        if [ -d "patches" ]; then
+          for patch in patches/*.patch; do
+            echo "Applying: $patch"
+            patch -d openwrt -p1 < "$patch" || { echo "Failed to apply $patch"; exit 1; }
+          done
+        fi
+
+    - name: Generate DTS for custom flash
+      if: matrix.flash_size != '8'
+      run: |
+        cd openwrt
+        FLASH_MB=${{ matrix.flash_size }}
+        CALDATA_END=$((0x670000))
+        FLASH_BYTES=$((FLASH_MB * 1024 * 1024))
+        FWCONCAT1_SIZE=$((FLASH_BYTES - CALDATA_END))
+        FWCONCAT1_HEX=$(printf "0x%x" $FWCONCAT1_SIZE)
+        DEVICE_NAME="dlink_dir-825-b1-${FLASH_MB}m"
+        DTS_FILE="target/linux/ath79/dts/ar7161_${DEVICE_NAME}.dts"
+        GENERIC_MK="target/linux/ath79/image/generic.mk"
+        DEVICE_ID="dlink_dir-825-b1-${FLASH_MB}m"
+
+        # Generate DTS if not exists
+        if [ ! -f "$DTS_FILE" ]; then
+          printf '%s\n' \
+            '// SPDX-License-Identifier: GPL-2.0-or-later OR MIT' \
+            '/dts-v1/;' \
+            '#include "ar7161_dlink_dir-825-b1.dts"' \
+            "// D-Link DIR-825-B1 with ${FLASH_MB}MB flash" \
+            '/ {' \
+            "	model = \"D-Link DIR-825 B1 (${FLASH_MB}MB)\";" \
+            "	compatible = \"dlink,dir-825-b1-${FLASH_MB}m\", \"dlink,dir-825-b1\", \"qca,ar7161\";" \
+            '};' \
+            '&fwconcat1 {' \
+            "	reg = <0x670000 ${FWCONCAT1_HEX}>;" \
+            '};' > "$DTS_FILE"
+          echo "Generated: $DTS_FILE"
+        else
+          echo "DTS exists: $DTS_FILE"
+        fi
+
+        # Register device in generic.mk if not exists
+        if ! grep -q "define Device/${DEVICE_ID}" "$GENERIC_MK"; then
+          printf '\n%s\n' \
+            "define Device/${DEVICE_ID}" \
+            '  $(call Device/dlink_dir-825-b1)' \
+            "  DEVICE_MODEL := DIR-825 B1 (${FLASH_MB}MB)" \
+            "  DEVICE_DTS := ar7161_${DEVICE_ID}" \
+            'endef' \
+            "TARGET_DEVICES += ${DEVICE_ID}" >> "$GENERIC_MK"
+          echo "Registered device: ${DEVICE_ID}"
+        else
+          echo "Device already registered: ${DEVICE_ID}"
+        fi
+
+    - name: Update feeds
+      run: |
+        cd openwrt
+        START=$(date +%s)
+        # Retry feeds update with exponential backoff
+        for delay in 0 5 10 30 60 120; do
+          [ $delay -gt 0 ] && { echo "Retrying in ${delay}s..."; sleep $delay; }
+          echo "=== Feeds update attempt ==="
+          ./scripts/feeds update -a && break
+        done
+        ./scripts/feeds install -a
+        echo "Feeds update time: $(($(date +%s) - START)) seconds"
+
+    - name: Configure build
+      run: |
+        cd openwrt
+        FLASH_MB=${{ matrix.flash_size }}
+        OPT=${{ matrix.opt }}
+
+        if [ "$FLASH_MB" = "8" ]; then
+          DEVICE_CFG="${DEVICE}"
+        else
+          DEVICE_CFG="dlink_dir-825-b1-${FLASH_MB}m"
+        fi
+
+        # Base config
+        printf '%s\n' \
+          "CONFIG_TARGET_${TARGET}=y" \
+          "CONFIG_TARGET_${TARGET}_${SUBTARGET}=y" \
+          "CONFIG_TARGET_${TARGET}_${SUBTARGET}_DEVICE_${DEVICE_CFG}=y" > .config
+
+        # Optimization config based on level
+        case "$OPT" in
+          base)
+            echo "Optimization: Base (default -Os)"
+            ;;
+          lto|lto-gc|x)
+            echo "CONFIG_DEVEL=y" >> .config  # Required for LTO options
+            ;;&
+          lto)
+            echo "Optimization: LTO"
+            echo "CONFIG_USE_LTO=y" >> .config
+            ;;
+          lto-gc)
+            echo "Optimization: LTO + GC_SECTIONS"
+            echo "CONFIG_USE_LTO=y" >> .config
+            echo "CONFIG_USE_GC_SECTIONS=y" >> .config
+            ;;
+          x)
+            echo "Optimization: X (experimental)"
+            echo "CONFIG_USE_LTO=y" >> .config
+            echo "CONFIG_USE_GC_SECTIONS=y" >> .config
+            echo 'CONFIG_EXTRA_OPTIMIZATION="-fsection-anchors -fipa-pta -fira-loop-pressure -fira-region=all"' >> .config
+            ;;
+        esac
+
+        make defconfig
+
+        # Verify device is selected
+        echo "=== Configured device ==="
+        if ! grep -q "CONFIG_TARGET_${TARGET}_${SUBTARGET}_DEVICE_${DEVICE_CFG}=y" .config; then
+          echo "ERROR: Device ${DEVICE_CFG} not selected!"
+          grep "CONFIG_TARGET_${TARGET}_${SUBTARGET}_DEVICE_" .config || true
+          exit 1
+        fi
+
+        # Verify LTO if requested
+        if [ "$OPT" != "base" ]; then
+          if ! grep -q "CONFIG_USE_LTO=y" .config; then
+            echo "ERROR: LTO not enabled!"
+            grep -i "lto" .config || echo "No LTO options in config"
+            exit 1
+          fi
+          echo "LTO: enabled"
+        fi
+
+        # Verify GC_SECTIONS if requested
+        if [ "$OPT" = "lto-gc" ] || [ "$OPT" = "x" ]; then
+          if ! grep -q "CONFIG_USE_GC_SECTIONS=y" .config; then
+            echo "WARNING: GC_SECTIONS not enabled (may be unsupported)"
+          else
+            echo "GC_SECTIONS: enabled"
+          fi
+        fi
+
+        echo "=== Final config ==="
+        grep -E "^CONFIG_(USE_LTO|USE_GC_SECTIONS|EXTRA_OPTIMIZATION)" .config || echo "(default options)"
+
+    - name: Download sources
+      run: |
+        cd openwrt
+        START=$(date +%s)
+        make -j$(nproc) download || make -j1 V=s download
+        echo "Download time: $(($(date +%s) - START)) seconds"
+        # Remove failed downloads (zero-size files)
+        find dl -size 0 -delete 2>/dev/null || true
+
+    - name: Build firmware
+      timeout-minutes: 90
+      run: |
+        cd openwrt
+        echo "=== Building firmware (flash=${{ matrix.flash_size }}MB, opt=${{ matrix.opt }}) ==="
+        START=$(date +%s)
+        # Skip toolchain rebuild - use cached toolchain
+        make -j$(nproc) target/compile package/compile package/install target/install package/index \
+          || make -j1 V=s target/compile package/compile package/install target/install package/index
+        DURATION=$(($(date +%s) - START))
+        echo ""
+        echo "========================================="
+        echo "Firmware build time: ${DURATION} seconds ($(($DURATION / 60)) min)"
+        echo "========================================="
+
+    - name: Collect build stats
+      if: inputs.collect_stats == true || inputs.collect_stats == 'true'
+      run: |
+        VARIANT="flash${{ matrix.flash_size }}-${{ matrix.opt }}"
+        STATS="build-stats-${VARIANT}.txt"
+        {
+          echo "=== OpenWrt Firmware Build Stats ==="
+          echo "Variant: flash=${{ matrix.flash_size }}MB, opt=${{ matrix.opt }}"
+          echo "Date: $(date -Iseconds)"
+          echo ""
+          echo "=== Total sizes ==="
+          echo "Uncompressed:"
+          du -sh openwrt/staging_dir openwrt/build_dir openwrt/dl 2>/dev/null || true
+          echo ""
+          echo "Compressed (zstd):"
+          printf "staging_dir: "; tar -cf - -C openwrt staging_dir 2>/dev/null | zstd -1 -c | wc -c | awk '{printf "%.2f GB\n", $1/1024/1024/1024}'
+          printf "build_dir:   "; tar -cf - -C openwrt build_dir 2>/dev/null | zstd -1 -c | wc -c | awk '{printf "%.2f GB\n", $1/1024/1024/1024}'
+          printf "dl:          "; tar -cf - -C openwrt dl 2>/dev/null | zstd -1 -c | wc -c | awk '{printf "%.2f GB\n", $1/1024/1024/1024}'
+          echo ""
+          echo "=== build_dir breakdown ==="
+          du -sh openwrt/build_dir/*/ 2>/dev/null | sort -rh || true
+          echo ""
+          echo "=== Firmware files ==="
+          ls -lh openwrt/bin/targets/${TARGET}/${SUBTARGET}/*.bin 2>/dev/null || true
+        } | tee "$STATS"
+        mkdir -p ${{ github.workspace }}/stats
+        cp "$STATS" ${{ github.workspace }}/stats/
+
+    - name: Verify firmware size
+      run: |
+        cd openwrt/bin/targets/${TARGET}/${SUBTARGET}
+        FLASH_MB=${{ matrix.flash_size }}
+
+        if [ "$FLASH_MB" = "8" ]; then
+          PATTERN="*${DEVICE}*sysupgrade*"
+        else
+          PATTERN="*dir-825-b1-${FLASH_MB}m*sysupgrade*"
+        fi
+
+        shopt -s nullglob
+        FILES=($PATTERN)
+        if [ ${#FILES[@]} -eq 0 ]; then
+          echo "ERROR: No firmware files matching $PATTERN"
+          ls -la
+          exit 1
+        fi
+
+        for f in "${FILES[@]}"; do
+          SIZE=$(stat -c%s "$f")
+          # Max size = fwconcat0 + fwconcat1
+          # fwconcat0 = 0x610000 (6356992)
+          # fwconcat1 depends on flash size
+          FWCONCAT0=6356992
+          FWCONCAT1=$(( (FLASH_MB * 1024 * 1024) - 0x670000 ))
+          MAX_SIZE=$((FWCONCAT0 + FWCONCAT1))
+
+          echo "Firmware: $f"
+          echo "Size: $SIZE bytes"
+          echo "Max allowed: $MAX_SIZE bytes"
+
+          if [ "$SIZE" -gt "$MAX_SIZE" ]; then
+            echo "ERROR: Firmware too large!"
+            exit 1
+          fi
+          echo "OK: Firmware fits in flash"
+        done
+
+    - name: Prepare artifact
+      id: artifact
+      run: |
+        FLASH_MB=${{ matrix.flash_size }}
+        OPT=${{ matrix.opt }}
+        VERSION=${{ needs.prepare.outputs.openwrt_tag }}
+        VERSION_SHORT=$(echo "$VERSION" | sed 's/^v//')
+
+        # Build archive name based on optimization level
+        case "$OPT" in
+          base)
+            ARCHIVE_NAME="openwrt-${VERSION_SHORT}-DIR-825-B1-${FLASH_MB}MB"
+            ;;
+          lto)
+            ARCHIVE_NAME="openwrt-${VERSION_SHORT}-DIR-825-B1-${FLASH_MB}MB-LTO"
+            ;;
+          lto-gc)
+            ARCHIVE_NAME="openwrt-${VERSION_SHORT}-DIR-825-B1-${FLASH_MB}MB-LTO-GC"
+            ;;
+          x)
+            ARCHIVE_NAME="openwrt-${VERSION_SHORT}-DIR-825-B1-${FLASH_MB}MB-X"
+            ;;
+        esac
+
+        mkdir -p artifacts
+        SRC="openwrt/bin/targets/${TARGET}/${SUBTARGET}"
+        if [ "$FLASH_MB" = "8" ]; then
+          cp "${SRC}"/*"${DEVICE}"*.bin artifacts/ 2>/dev/null || true
+        else
+          cp "${SRC}"/*dir-825-b1-"${FLASH_MB}"m*.bin artifacts/ 2>/dev/null || true
+        fi
+
+        # Verify firmware files exist
+        if [ -z "$(ls -A artifacts/*.bin 2>/dev/null)" ]; then
+          echo "ERROR: No firmware files found!"
+          ls -la "${SRC}/" || true
+          exit 1
+        fi
+
+        # Get sysupgrade size for reporting
+        SYSUPGRADE=$(ls artifacts/*sysupgrade*.bin 2>/dev/null | head -1)
+        if [ -n "$SYSUPGRADE" ]; then
+          SIZE_BYTES=$(stat -c%s "$SYSUPGRADE")
+          echo "size=${SIZE_BYTES}" >> $GITHUB_OUTPUT
+          echo "Sysupgrade size: ${SIZE_BYTES} bytes ($(awk "BEGIN {printf \"%.2f\", ${SIZE_BYTES}/1024/1024}") MB)"
+        fi
+
+        # Save size to file for release job
+        mkdir -p sizes
+        echo "${SIZE_BYTES}" > "sizes/${FLASH_MB}-${OPT}.txt"
+
+        # Create 7z archive
+        7z a -mx=9 "${ARCHIVE_NAME}.7z" artifacts/*.bin
+        rm -rf artifacts/*.bin
+        mv "${ARCHIVE_NAME}.7z" artifacts/
+
+        echo "name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
+        echo "=== Artifacts ==="
+        ls -la artifacts/
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.artifact.outputs.name }}
+        path: artifacts/*
+        retention-days: 90
+
+    - name: Upload size info
+      uses: actions/upload-artifact@v4
+      with:
+        name: size-${{ matrix.flash_size }}-${{ matrix.opt }}
+        path: sizes/
+        retention-days: 1
+
+    - name: Upload ELF file
+      if: inputs.save_elf == true || inputs.save_elf == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: elf-${{ matrix.flash_size }}-${{ matrix.opt }}
+        path: openwrt/build_dir/target-*/linux-*/vmlinux.elf
+        retention-days: 1
+
+  # === Job 5: Create release ===
+  release:
+    needs: [prepare, build-firmware]
+    runs-on: ubuntu-latest
+    # Create release if at least some builds succeeded (partial release OK)
+    if: always() && needs.build-firmware.result != 'cancelled' && inputs.create_release != false && inputs.create_release != 'false'
+
+    steps:
+    - name: Download firmware artifacts
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        path: release
+        pattern: openwrt-*
+        merge-multiple: true
+
+    - name: Download size artifacts
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        path: sizes
+        pattern: size-*
+        merge-multiple: true
+
+    - name: Download ELF artifacts
+      if: inputs.save_elf == true || inputs.save_elf == 'true'
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        path: elf
+        pattern: elf-*
+        merge-multiple: false
+
+    - name: Pack ELF files
+      if: inputs.save_elf == true || inputs.save_elf == 'true'
+      run: |
+        VERSION=${{ needs.prepare.outputs.openwrt_tag }}
+        VERSION_SHORT=$(echo "$VERSION" | sed 's/^v//')
+        mkdir -p elf-all elf-out
+        # Collect and rename ELF files
+        for dir in elf/elf-*/; do
+          if [ -d "$dir" ]; then
+            NAME=$(basename "$dir" | sed 's/elf-//')  # e.g., "8-base"
+            FLASH=$(echo "$NAME" | cut -d- -f1)
+            OPT=$(echo "$NAME" | cut -d- -f2)
+            find "$dir" -name "*.elf" -exec cp {} "elf-all/vmlinux-${FLASH}MB-${OPT}.elf" \;
+          fi
+        done
+        if [ -n "$(ls -A elf-all/ 2>/dev/null)" ]; then
+          sudo apt-get update && sudo apt-get install -y p7zip-full
+          7z a -mx=9 "elf-out/vmlinux-${VERSION_SHORT}.7z" elf-all/*.elf
+          echo "Created ELF archive with $(ls elf-all/*.elf | wc -l) files"
+        fi
+
+    - name: Upload ELF archive
+      if: inputs.save_elf == true || inputs.save_elf == 'true'
+      uses: actions/upload-artifact@v4
+      continue-on-error: true
+      with:
+        name: vmlinux-elf
+        path: elf-out/*.7z
+        retention-days: 90
+
+    - name: Prepare release files
+      id: release_files
+      run: |
+        mkdir -p release sizes
+        ls -la release/
+        ls -la sizes/ 2>/dev/null || echo "No size files"
+
+        # Helper function to format size with delta and free space (8MB only)
+        format_size() {
+          local size=$1
+          local base=$2
+          local flash_mb=$3
+          if [ -z "$size" ] || [ "$size" = "0" ]; then
+            echo "—"
+            return
+          fi
+
+          # Format size with thousand separators
+          local size_fmt=$(printf "%'d" $size)
+
+          # Delta from base (always show if base provided)
+          local delta_str=""
+          if [ -n "$base" ] && [ "$base" != "0" ]; then
+            local delta=$((size - base))
+            local delta_fmt=$(printf "%'+d" $delta)
+            delta_str=" (${delta_fmt})"
+          fi
+
+          # Free space suffix - only show for 8MB where space is tight
+          local free_suffix=""
+          if [ "$flash_mb" = "8" ]; then
+            # max = fwconcat0 (0x610000) + fwconcat1 (flash - 0x670000)
+            local max_size=$((6356992 + 8 * 1024 * 1024 - 6750208))
+            local free=$((max_size - size))
+            local free_kb=$((free / 1024))
+            free_suffix=", ${free_kb}K free"
+          fi
+
+          echo "${size_fmt}${delta_str}${free_suffix}"
+        }
+
+        # Generate dynamic table based on actual artifacts
+        echo "Generating release table..."
+
+        {
+          echo "| Flash | Base | LTO | LTO-GC | X |"
+          echo "|------:|------|-----|--------|---|"
+
+          for flash in 8 16 32 64; do
+            if [ "$flash" = "8" ]; then
+              ROW="| 8MB (stock)"
+            else
+              ROW="| ${flash}MB"
+            fi
+
+            # Get base size for delta calculation
+            BASE_SIZE=""
+            if [ -f "sizes/${flash}-base.txt" ]; then
+              BASE_SIZE=$(cat "sizes/${flash}-base.txt" 2>/dev/null)
+            fi
+
+            for opt in base lto lto-gc x; do
+              # Check if archive exists
+              case "$opt" in
+                base) PATTERN="*-${flash}MB.7z" ;;
+                lto) PATTERN="*-${flash}MB-LTO.7z" ;;
+                lto-gc) PATTERN="*-${flash}MB-LTO-GC.7z" ;;
+                x) PATTERN="*-${flash}MB-X.7z" ;;
+              esac
+
+              if ls release/$PATTERN 1>/dev/null 2>&1; then
+                # Get size from file
+                SIZE=""
+                if [ -f "sizes/${flash}-${opt}.txt" ]; then
+                  SIZE=$(cat "sizes/${flash}-${opt}.txt" 2>/dev/null)
+                fi
+                if [ "$opt" = "base" ]; then
+                  CELL=$(format_size "$SIZE" "" "$flash")
+                else
+                  CELL=$(format_size "$SIZE" "$BASE_SIZE" "$flash")
+                fi
+                ROW="$ROW | $CELL"
+              else
+                ROW="$ROW | —"
+              fi
+            done
+            echo "$ROW |"
+          done
+        } > table.md
+
+        echo "TABLE<<EOF" >> $GITHUB_OUTPUT
+        cat table.md >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+        echo "Generated table:"
+        cat table.md
+
+        # Check if any artifacts exist
+        if [ -z "$(ls -A release/*.7z 2>/dev/null)" ]; then
+          echo "ERROR: No artifacts found, skipping release"
+          echo "skip=true" >> $GITHUB_OUTPUT
+        else
+          echo "skip=false" >> $GITHUB_OUTPUT
+          echo "Found $(ls release/*.7z | wc -l) archives"
+        fi
+
+    - name: Create Release
+      if: steps.release_files.outputs.skip != 'true'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ needs.prepare.outputs.openwrt_tag }}
+        name: "OpenWrt ${{ needs.prepare.outputs.openwrt_tag }} for DIR-825-B1"
+        body: |
+          ## OpenWrt ${{ needs.prepare.outputs.openwrt_tag }} for D-Link DIR-825-B1
+
+          ### Downloads
+
+          ${{ steps.release_files.outputs.TABLE }}
+
+          ### Archive contents
+          - `*-sysupgrade.bin` — upgrade via LuCI web interface
+          - `*-initramfs-kernel.bin` — initial install via TFTP
+
+          ### Optimization levels
+          | Variant | Description |
+          |---------|-------------|
+          | **Base** | Default OpenWrt (`-Os`) |
+          | **LTO** | Link-Time Optimization |
+          | **LTO-GC** | LTO + GC_SECTIONS |
+          | **X** | Experimental: LTO + GC + extra GCC flags |
+        files: release/*.7z
+        draft: false
+        prerelease: false
+
+    - name: Cleanup temporary artifacts
+      continue-on-error: true
+      run: |
+        # Delete size-* and elf-* temporary artifacts
+        gh api repos/${{ github.repository }}/actions/artifacts --paginate -q '.artifacts[] | select(.name | startswith("size-") or startswith("elf-")) | .id' | \
+        while read id; do
+          echo "Deleting artifact $id"
+          gh api -X DELETE repos/${{ github.repository }}/actions/artifacts/$id || true
+        done
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
