@@ -535,22 +535,16 @@ jobs:
         DTS_FILE="target/linux/ramips/dts/rt5350_${DEVICE_NAME}.dts"
         RT305X_MK="target/linux/ramips/image/rt305x.mk"
 
-        # Generate DTS if not exists
+        # Generate DTS by copying base and modifying partition size
         if [ ! -f "$DTS_FILE" ]; then
-          printf '%s\n' \
-            '// SPDX-License-Identifier: GPL-2.0-or-later OR MIT' \
-            '// HAME MPR-A5 with '"${FLASH_MB}"'MB flash' \
-            '' \
-            '#include "rt5350_hame_mpr-a5.dts"' \
-            '' \
-            '/ {' \
-            '	model = "HAME MPR-A5 ('"${FLASH_MB}"'MB)";' \
-            '	compatible = "hame,mpr-a5-'"${FLASH_MB}"'m", "hame,mpr-a5", "ralink,rt5350-soc";' \
-            '};' \
-            '' \
-            '&firmware {' \
-            '	reg = <0x50000 '"${FIRMWARE_HEX}"'>;' \
-            '};' > "$DTS_FILE"
+          BASE_DTS="target/linux/ramips/dts/rt5350_hame_mpr-a5.dts"
+          cp "$BASE_DTS" "$DTS_FILE"
+          # Update model name
+          sed -i 's/model = "HAME MPR-A5"/model = "HAME MPR-A5 ('"${FLASH_MB}"'MB)"/' "$DTS_FILE"
+          # Update compatible string
+          sed -i 's/compatible = "hame,mpr-a5"/compatible = "hame,mpr-a5-'"${FLASH_MB}"'m", "hame,mpr-a5"/' "$DTS_FILE"
+          # Update firmware partition size
+          sed -i 's/reg = <0x50000 0x[0-9a-fA-F]*>/reg = <0x50000 '"${FIRMWARE_HEX}"'>/' "$DTS_FILE"
           echo "Generated: $DTS_FILE"
           cat "$DTS_FILE"
         else
