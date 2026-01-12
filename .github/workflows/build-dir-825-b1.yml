@@ -800,10 +800,8 @@ jobs:
         mkdir -p sizes
         echo "${SIZE_BYTES}" > "sizes/${FLASH_MB}-${OPT}.txt"
 
-        # Create 7z archive
-        7z a -mx=9 "${ARCHIVE_NAME}.7z" artifacts/*.bin
-        rm -rf artifacts/*.bin
-        mv "${ARCHIVE_NAME}.7z" artifacts/
+        # Create 7z archive (without artifacts/ prefix)
+        (cd artifacts && 7z a -mx=9 "${ARCHIVE_NAME}.7z" *.bin && rm -f *.bin)
 
         echo "name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
         echo "=== Artifacts ==="
@@ -839,6 +837,8 @@ jobs:
     if: always() && needs.build-firmware.result != 'cancelled' && inputs.create_release != false && inputs.create_release != 'false'
 
     steps:
+    - run: echo "SHORT_SHA=${GITHUB_SHA::4}" >> $GITHUB_ENV
+
     - name: Download firmware artifacts
       uses: actions/download-artifact@v4
       continue-on-error: true
@@ -1004,7 +1004,7 @@ jobs:
       if: steps.release_files.outputs.skip != 'true'
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ needs.prepare.outputs.openwrt_tag }}
+        tag_name: ${{ needs.prepare.outputs.openwrt_tag }}-dir825-b${{ github.run_number }}-${{ env.SHORT_SHA }}
         name: "OpenWrt ${{ needs.prepare.outputs.openwrt_tag }} for DIR-825-B1"
         body: |
           ## OpenWrt ${{ needs.prepare.outputs.openwrt_tag }} for D-Link DIR-825-B1
