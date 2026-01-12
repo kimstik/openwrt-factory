@@ -6,8 +6,8 @@ Automatic OpenWrt builds for legacy routers with flash modifications.
 
 | Device            | SoC    | Target        | Stock Flash | Variants      |
 |-------------------|--------|---------------|-------------|---------------|
-| D-Link DIR-825-B1 | AR7161 | ath79/generic | 8MB         | 8/16/32/64 MB |
-| HAME MPR-A5       | RT5350 | ramips/rt305x | 4MB         | 8/16/32/64 MB |
+| D-Link DIR-825-B1 | AR7161 | ath79/generic | 8MB         | 8/16/32/64/128 MB |
+| HAME MPR-A5       | RT5350 | ramips/rt305x | 4MB         | 8/16/32/64/128 MB |
 
 ## Downloads
 
@@ -27,7 +27,7 @@ Ready-to-use firmware available in [Releases](../../releases).
 | lto    | Link-Time Optimization   | No      |
 | lto-gc | LTO + GC sections        | No      |
 
-Default: 8 builds per device (4 flash x 2 opt). Enable lto/lto-gc via workflow UI.
+Default: 10 builds per device (5 flash x 2 opt). Enable lto/lto-gc via workflow UI.
 
 ---
 
@@ -52,24 +52,26 @@ When replacing flash with a larger one, only the fwconcat1 partition expands.
 +------------------+
 ```
 
-| Flash | fwconcat1 size      |
-|-------|---------------------|
-| 8MB   | 0x190000  ( 1.6MB)  |
-| 16MB  | 0x990000  ( 9.6MB)  |
-| 32MB  | 0x1990000 (25.6MB)  |
-| 64MB  | 0x3990000 (57.6MB)  |
+| Flash  | fwconcat1 size       |
+|--------|----------------------|
+| 8MB    | 0x190000  (  1.6MB)  |
+| 16MB   | 0x990000  (  9.6MB)  |
+| 32MB   | 0x1990000 ( 25.6MB)  |
+| 64MB   | 0x3990000 ( 57.6MB)  |
+| 128MB  | 0x7990000 (121.6MB)  |
 
 </details>
 
 <details>
 <summary>Flash Chips</summary>
 
-| Flash | Chip     |
-|-------|----------|
-| 8MB   | Stock    |
-| 16MB  | W25Q128  |
-| 32MB  | W25Q256  |
-| 64MB  | W25Q512  |
+| Flash  | Chip     |
+|--------|----------|
+| 8MB    | Stock    |
+| 16MB   | W25Q128  |
+| 32MB   | W25Q256  |
+| 64MB   | W25Q512  |
+| 128MB  | W25Q01JV |
 
 </details>
 
@@ -96,12 +98,13 @@ Linear flash layout - firmware partition expands with larger flash.
 +------------------+
 ```
 
-| Flash | Firmware size       |
-|-------|---------------------|
-| 8MB   | 0x7B0000  ( 7.7MB)  |
-| 16MB  | 0xFB0000  (15.7MB)  |
-| 32MB  | 0x1FB0000 (31.7MB)  |
-| 64MB  | 0x3FB0000 (63.7MB)  |
+| Flash  | Firmware size        |
+|--------|----------------------|
+| 8MB    | 0x7B0000  (  7.7MB)  |
+| 16MB   | 0xFB0000  ( 15.7MB)  |
+| 32MB   | 0x1FB0000 ( 31.7MB)  |
+| 64MB   | 0x3FB0000 ( 63.7MB)  |
+| 128MB  | 0x7FB0000 (127.7MB)  |
 
 </details>
 
@@ -110,7 +113,7 @@ Linear flash layout - firmware partition expands with larger flash.
 
 - SoC: Ralink RT5350 (360 MHz)
 - RAM: 32 MB (upgradeable)
-- Flash: 8-64 MB (upgradeable, stock 4 MB)
+- Flash: 8-128 MB (upgradeable, stock 4 MB)
 - WiFi: RT5350 built-in 802.11bgn
 - USB: 1x USB 2.0 host
 - Ethernet: 1x 100M
