@@ -18,7 +18,7 @@ on:
       flash_sizes:
         description: 'Flash sizes (comma-separated)'
         required: false
-        default: '8,16,32,64'
+        default: '8,16,32,64,128'
       opt_base:
         description: 'Build Base (default -Os)'
         required: false
@@ -119,7 +119,7 @@ jobs:
       id: matrix
       run: |
         SIZES="${{ inputs.flash_sizes }}"
-        [ -z "$SIZES" ] && SIZES="8,16,32,64"
+        [ -z "$SIZES" ] && SIZES="8,16,32,64,128"
         SIZES=$(echo "$SIZES" | tr -d ' ')
 
         # Collect selected optimization levels
@@ -923,7 +923,7 @@ jobs:
           echo "| Flash | Base | LTO | LTO-GC | X |"
           echo "|------:|------|-----|--------|---|"
 
-          for flash in 8 16 32 64; do
+          for flash in 8 16 32 64 128; do
             ROW="| ${flash}MB"
 
             # Get base size for delta calculation
