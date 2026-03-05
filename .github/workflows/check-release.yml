@@ -41,21 +41,31 @@ jobs:
         echo "tag=$TAG" >> $GITHUB_OUTPUT
         echo "Latest OpenWrt: $TAG"
 
-    - name: Check if release exists
+    - name: Check existing releases for this version
       id: check
       run: |
-        if gh release view "${{ steps.openwrt.outputs.tag }}" --repo ${{ github.repository }} &>/dev/null; then
-          echo "exists=true" >> $GITHUB_OUTPUT
-          echo "Release ${{ steps.openwrt.outputs.tag }} already exists"
+        TAG="${{ steps.openwrt.outputs.tag }}"
+        TAGS=$(gh release list --repo ${{ github.repository }} --json tagName -q '.[].tagName')
+        if echo "$TAGS" | grep -q "^${TAG}-dir825"; then
+          echo "dir825=true" >> $GITHUB_OUTPUT
+          echo "DIR-825-B1 release for $TAG already exists"
         else
-          echo "exists=false" >> $GITHUB_OUTPUT
-          echo "New release detected: ${{ steps.openwrt.outputs.tag }}"
+          echo "dir825=false" >> $GITHUB_OUTPUT
+          echo "No DIR-825-B1 release for $TAG"
+        fi
+        if echo "$TAGS" | grep -q "^${TAG}-a5"; then
+          echo "a5=true" >> $GITHUB_OUTPUT
+          echo "HAME-A5 release for $TAG already exists"
+        else
+          echo "a5=false" >> $GITHUB_OUTPUT
+          echo "No HAME-A5 release for $TAG"
         fi
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Check if DIR-825-B1 build is running
       id: build_status_825
+      if: steps.check.outputs.dir825 == 'false'
       run: |
         RUNNING=$(gh run list --workflow=build-dir-825-b1.yml --repo ${{ github.repository }} \
           --status in_progress --status queued --json databaseId --jq 'length' 2>/dev/null || echo "0")
@@ -70,6 +80,7 @@ jobs:
 
     - name: Check if HAME-A5 build is running
       id: build_status_a5
+      if: steps.check.outputs.a5 == 'false'
       run: |
         RUNNING=$(gh run list --workflow=build-hame-a5.yml --repo ${{ github.repository }} \
           --status in_progress --status queued --json databaseId --jq 'length' 2>/dev/null || echo "0")
@@ -83,7 +94,7 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Trigger DIR-825-B1 build
-      if: steps.check.outputs.exists == 'false' && steps.build_status_825.outputs.running != 'true'
+      if: steps.check.outputs.dir825 == 'false' && steps.build_status_825.outputs.running != 'true'
       run: |
         gh workflow run build-dir-825-b1.yml \
           --repo ${{ github.repository }} \
@@ -93,7 +104,7 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Trigger HAME-A5 build
-      if: steps.check.outputs.exists == 'false' && steps.build_status_a5.outputs.running != 'true'
+      if: steps.check.outputs.a5 == 'false' && steps.build_status_a5.outputs.running != 'true'
       run: |
         gh workflow run build-hame-a5.yml \
           --repo ${{ github.repository }} \
