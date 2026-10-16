@@ -16,6 +16,13 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+    - name: Keep scheduled workflow enabled
+      if: github.event_name == 'schedule'
+      continue-on-error: true
+      run: gh api -X PUT repos/${{ github.repository }}/actions/workflows/check-release.yml/enable
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
     - name: Cleanup old workflow runs
       continue-on-error: true
       run: |
