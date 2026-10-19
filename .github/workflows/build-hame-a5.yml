@@ -818,7 +818,11 @@ jobs:
     if: always() && needs.build-firmware.result != 'cancelled' && inputs.create_release != false && inputs.create_release != 'false'
 
     steps:
-    - run: echo "SHORT_SHA=${GITHUB_SHA::4}" >> $GITHUB_ENV
+    - run: |
+        echo "SHORT_SHA=${GITHUB_SHA::4}" >> $GITHUB_ENV
+        echo "OWRT_VER=${OWRT_TAG#v}" >> $GITHUB_ENV
+      env:
+        OWRT_TAG: ${{ needs.prepare.outputs.openwrt_tag }}
 
     - name: Download firmware artifacts
       uses: actions/download-artifact@v4
@@ -982,7 +986,7 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ needs.prepare.outputs.openwrt_tag }}-a5-b${{ github.run_number }}-${{ env.SHORT_SHA }}
-        name: "OpenWrt ${{ needs.prepare.outputs.openwrt_tag }} for HAME-A5"
+        name: "${{ env.OWRT_VER }} HAME-A5"
         body: |
           ## OpenWrt ${{ needs.prepare.outputs.openwrt_tag }} for HAME MPR-A5
 
