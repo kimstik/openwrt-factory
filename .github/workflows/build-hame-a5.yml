@@ -1014,8 +1014,8 @@ jobs:
     - name: Cleanup temporary artifacts
       continue-on-error: true
       run: |
-        # Delete size-a5-* and elf-a5-* temporary artifacts
-        gh api repos/${{ github.repository }}/actions/artifacts --paginate -q '.artifacts[] | select(.name | startswith("size-a5-") or startswith("elf-a5-")) | .id' | \
+        # Delete size-a5-* and elf-a5-* temporary artifacts of this run only
+        gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts --paginate -q '.artifacts[] | select(.name | startswith("size-a5-") or startswith("elf-a5-")) | .id' | \
         while read id; do
           echo "Deleting artifact $id"
           gh api -X DELETE repos/${{ github.repository }}/actions/artifacts/$id || true
